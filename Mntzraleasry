@@ -1,0 +1,856 @@
+# -*- coding: utf-8 -*-
+"""
+Iraq Doctor Appointment Booking App
+Single-file Python / Kivy mobile application with SQLite backend
+Run on Android: Pydroid 3 (install Kivy + Kivy plugin), or Kivy Launcher
+"""
+
+import os
+import sqlite3
+import webbrowser
+from datetime import datetime, timedelta, date
+from kivy.app import App
+from kivy.uix.screenmanager import ScreenManager, Screen, SlideTransition
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.gridlayout import GridLayout
+from kivy.uix.scrollview import ScrollView
+from kivy.uix.label import Label
+from kivy.uix.button import Button
+from kivy.uix.textinput import TextInput
+from kivy.uix.popup import Popup
+from kivy.uix.spinner import Spinner
+from kivy.graphics import Color, Rectangle, RoundedRectangle
+from kivy.metrics import dp, sp
+from kivy.core.window import Window
+from kivy.utils import get_color_from_hex
+
+# ---------- Theme ----------
+C_PRIMARY   = get_color_from_hex('#2A6FB8')
+C_SECONDARY = get_color_from_hex('#33B59A')
+C_DANGER    = get_color_from_hex('#D94141')
+C_BG        = get_color_from_hex('#F4F6F8')
+C_CARD      = get_color_from_hex('#FFFFFF')
+C_TEXT      = get_color_from_hex('#21293A')
+C_MUTED     = get_color_from_hex('#7A869A')
+C_BORDER    = get_color_from_hex('#DDE3EA')
+
+DB_NAME = 'clinic_app.db'
+
+# ============================================================
+#  DATABASE LAYER
+# ============================================================
+class DB:
+    _conn = None
+
+    @classmethod
+    def init(cls):
+        app = App.get_running_app()
+        path = os.path.join(app.user_data_dir, DB_NAME) if app else DB_NAME
+        cls._conn = sqlite3.connect(path)
+        cls._conn.row_factory = sqlite3.Row
+        cls._conn.execute("PRAGMA foreign_keys = ON")
+        cls._conn.executescript("""
+        CREATE TABLE IF NOT EXISTS patients(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            phone TEXT UNIQUE NOT NULL,
+            email TEXT,
+            password TEXT NOT NULL,
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS doctors(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            specialty TEXT NOT NULL,
+            clinic TEXT NOT NULL,
+            city TEXT NOT NULL,
+            address TEXT NOT NULL,
+            fee INTEGER NOT NULL,
+            experience_years INTEGER DEFAULT 0,
+            qualification TEXT,
+            working_hours TEXT,
+            lat REAL, lng REAL,
+            rating REAL DEFAULT 0,
+            rating_count INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS slots(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doctor_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            time TEXT NOT NULL,
+            booked INTEGER DEFAULT 0,
+            UNIQUE(doctor_id, date, time),
+            FOREIGN KEY(doctor_id) REFERENCES doctors(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS appointments(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doctor_id INTEGER NOT NULL,
+            patient_id INTEGER NOT NULL,
+            slot_id INTEGER NOT NULL UNIQUE,
+            status TEXT DEFAULT 'booked',
+            created_at TEXT,
+            FOREIGN KEY(doctor_id) REFERENCES doctors(id) ON DELETE CASCADE,
+            FOREIGN KEY(patient_id) REFERENCES patients(id) ON DELETE CASCADE,
+            FOREIGN KEY(slot_id) REFERENCES slots(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS reviews(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doctor_id INTEGER NOT NULL,
+            patient_id INTEGER NOT NULL,
+            rating INTEGER NOT NULL,
+            comment TEXT,
+            created_at TEXT,
+            FOREIGN KEY(doctor_id) REFERENCES doctors(id) ON DELETE CASCADE,
+            FOREIGN KEY(patient_id) REFERENCES patients(id) ON DELETE CASCADE
+        );
+        """)
+        cls._conn.commit()
+        cls._seed()
+
+    @classmethod
+    def _seed(cls):
+        c = cls._conn.cursor()
+        c.execute("SELECT COUNT(*) FROM doctors")
+        if c.fetchone()[0] > 0:
+            return
+        doctors = [
+            ("Dr. Ahmed Al-Khafaji", "Cardiology", "Al-Salam Clinic", "Baghdad",
+             "Karrada, St 14", 25000, 12, "MBChB, FIBMS Cardiology", "9:00-15:00",
+             33.3015, 44.4215),
+            ("Dr. Sara Hassan", "Dermatology", "Skin Care Center", "Baghdad",
+             "Mansour, 14 Ramadan St", 20000, 8, "MBChB, Diploma Dermatology", "10:00-17:00",
+             33.3125, 44.3412),
+            ("Dr. Ali Jabbar", "Pediatrics", "Child Health Clinic", "Basra",
+             "Al-Jazaer, Main St", 15000, 10, "MBChB, CABP", "8:00-14:00",
+             30.5085, 47.7804),
+            ("Dr. Noor Al-Zubaidi", "Orthopedics", "Bone & Joint Clinic", "Erbil",
+             "Citadel Road", 30000, 15, "MBChB, FRCS Ortho", "9:00-16:00",
+             36.1911, 44.0095),
+            ("Dr. Mustafa Kamal", "General Medicine", "Al-Noor Clinic", "Najaf",
+             "Kufa St", 10000, 5, "MBChB", "8:00-13:00",
+             32.0018, 44.3300),
+            ("Dr. Lina Kareem", "Ophthalmology", "Eye Care Center", "Baghdad",
+             "Zayouna, Main Rd", 22000, 7, "MBChB, Diploma Ophth", "10:00-16:00",
+             33.3320, 44.4655),
+            ("Dr. Haider Al-Saadi", "ENT", "ENT Clinic", "Karbala",
+             "Al-Abbas St", 18000, 9, "MBChB, FIBMS ENT", "9:00-15:00",
+             32.6160, 44.0249),
+        ]
+        c.executemany("""INSERT INTO doctors(name,specialty,clinic,city,address,fee,
+                         experience_years,qualification,working_hours,lat,lng)
+                         VALUES(?,?,?,?,?,?,?,?,?,?,?)""", doctors)
+        c.execute("SELECT id FROM doctors")
+        doc_ids = [r[0] for r in c.fetchall()]
+        times = ["09:00","10:00","11:00","12:00","16:00","17:00","18:00"]
+        today = date.today()
+        rows = []
+        for did in doc_ids:
+            for i in range(10):
+                dstr = (today + timedelta(days=i)).strftime("%Y-%m-%d")
+                for t in times:
+                    rows.append((did, dstr, t))
+        c.executemany("INSERT INTO slots(doctor_id,date,time) VALUES(?,?,?)", rows)
+        cls._conn.commit()
+
+    @classmethod
+    def q(cls, sql, params=()):
+        return cls._conn.execute(sql, params).fetchall()
+
+    @classmethod
+    def q1(cls, sql, params=()):
+        return cls._conn.execute(sql, params).fetchone()
+
+    @classmethod
+    def ex(cls, sql, params=()):
+        cur = cls._conn.execute(sql, params)
+        cls._conn.commit()
+        return cur.lastrowid
+
+
+# ============================================================
+#  UI HELPERS
+# ============================================================
+def card(bg=C_CARD, radius=dp(12), pad=dp(10), height=None, spacing=dp(6)):
+    box = BoxLayout(orientation='vertical', padding=pad, spacing=spacing,
+                    size_hint_y=None)
+    if height:
+        box.height = height
+    with box.canvas.before:
+        Color(*bg)
+        box.rect = RoundedRectangle(pos=box.pos, size=box.size, radius=[radius])
+    box.bind(pos=lambda *a: setattr(box.rect, 'pos', box.pos))
+    box.bind(size=lambda *a: setattr(box.rect, 'size', box.size))
+    return box
+
+def lbl(text, color=C_TEXT, size=14, bold=False, wrap=False, halign='left'):
+    l = Label(text=text, color=color, font_size=sp(size),
+              bold=bold, halign=halign, valign='middle')
+    if wrap:
+        l.bind(width=lambda *a: setattr(l, 'text_size', (l.width, None)))
+    return l
+
+def btn(text, bg=C_PRIMARY, fg=(1,1,1,1), height=dp(44), on_press=None, size_hint_x=1):
+    b = Button(text=text, background_normal='', background_color=bg,
+               color=fg, font_size=sp(14), bold=True,
+               size_hint_y=None, height=height, size_hint_x=size_hint_x)
+    if on_press:
+        b.bind(on_release=lambda *a: on_press())
+    return b
+
+def topbar(title, on_back=None, right_widget=None):
+    bar = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(56),
+                    padding=[dp(8), dp(8)], spacing=dp(6))
+    with bar.canvas.before:
+        Color(*C_PRIMARY)
+        bar.rect = Rectangle(pos=bar.pos, size=bar.size)
+    bar.bind(pos=lambda *a: setattr(bar.rect, 'pos', bar.pos))
+    bar.bind(size=lambda *a: setattr(bar.rect, 'size', bar.size))
+    if on_back:
+        back = Button(text='<', font_size=sp(22), bold=True,
+                      background_normal='', background_color=C_PRIMARY,
+                      color=(1,1,1,1), size_hint_x=None, width=dp(44))
+        back.bind(on_release=lambda *a: on_back())
+        bar.add_widget(back)
+    else:
+        bar.add_widget(Label(size_hint_x=None, width=dp(8)))
+    bar.add_widget(lbl(title, color=(1,1,1,1), size=18, bold=True))
+    bar.add_widget(right_widget if right_widget else Label())
+    return bar
+
+def scroll():
+    sv = ScrollView()
+    inner = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(8),
+                      padding=dp(10))
+    inner.bind(minimum_height=lambda *a: setattr(inner, 'height', inner.minimum_height))
+    sv.add_widget(inner)
+    return sv, inner
+
+def toast(text):
+    p = Popup(title='', content=lbl(text, size=14),
+              size_hint=(0.8, 0.3), background_color=C_CARD)
+    p.open()
+    from kivy.clock import Clock
+    Clock.schedule_once(lambda dt: p.dismiss(), 2.0)
+
+
+# ============================================================
+#  SCREENS
+# ============================================================
+class LoginScreen(Screen):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        root = BoxLayout(orientation='vertical', padding=dp(20), spacing=dp(12),
+                         size_hint_y=None)
+        root.bind(minimum_height=lambda *a: setattr(root, 'height', root.minimum_height))
+        sv = ScrollView()
+        sv.add_widget(root)
+        self.add_widget(sv)
+
+        root.add_widget(Label(size_hint_y=None, height=dp(40)))
+        root.add_widget(lbl('🩺', size=64, halign='center'))
+        root.add_widget(lbl('Doctor Booking Iraq', size=24, bold=True, halign='center',
+                            color=C_PRIMARY))
+        root.add_widget(lbl('Book appointments across Iraq', size=13, halign='center',
+                            color=C_MUTED))
+        root.add_widget(Label(size_hint_y=None, height=dp(20)))
+
+        self.phone = TextInput(hint_text='Phone or Email', multiline=False,
+                               size_hint_y=None, height=dp(48),
+                               padding=[dp(12), dp(12)])
+        self.pw = TextInput(hint_text='Password', password=True, multiline=False,
+                            size_hint_y=None, height=dp(48),
+                            padding=[dp(12), dp(12)])
+        root.add_widget(self.phone)
+        root.add_widget(self.pw)
+
+        root.add_widget(btn('Login', on_press=self.do_login))
+        root.add_widget(btn('Create Account', bg=C_SECONDARY,
+                            on_press=lambda: setattr(self.manager, 'current', 'register')))
+        root.add_widget(Label(size_hint_y=None, height=dp(20)))
+
+        demo = card(bg=get_color_from_hex('#EAF2FA'))
+        demo.add_widget(lbl('Demo: 07701234567 / 1234', color=C_MUTED, size=12))
+        root.add_widget(demo)
+
+    def do_login(self):
+        from app_globals import AppState
+        u = self.phone.text.strip()
+        p = self.pw.text.strip()
+        if not u or not p:
+            toast('Enter phone/email and password')
+            return
+        row = DB.q1("SELECT * FROM patients WHERE phone=? OR email=?", (u, u))
+        if not row or row['password'] != p:
+            toast('Invalid credentials')
+            return
+        AppState.patient_id = row['id']
+        AppState.patient_name = row['name']
+        self.phone.text = ''; self.pw.text = ''
+        self.manager.current = 'home'
+
+
+class RegisterScreen(Screen):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        root = BoxLayout(orientation='vertical', padding=dp(20), spacing=dp(10),
+                         size_hint_y=None)
+        root.bind(minimum_height=lambda *a: setattr(root, 'height', root.minimum_height))
+        sv = ScrollView(); sv.add_widget(root)
+        self.add_widget(sv)
+
+        root.add_widget(lbl('Create Account', size=22, bold=True, color=C_PRIMARY))
+        root.add_widget(Label(size_hint_y=None, height=dp(10)))
+
+        self.name = TextInput(hint_text='Full Name', size_hint_y=None,
+                              height=dp(46), padding=[dp(12), dp(10)])
+        self.phone = TextInput(hint_text='Phone (e.g. 07701234567)', size_hint_y=None,
+                               height=dp(46), padding=[dp(12), dp(10)])
+        self.email = TextInput(hint_text='Email', size_hint_y=None,
+                               height=dp(46), padding=[dp(12), dp(10)])
+        self.pw = TextInput(hint_text='Password', password=True, size_hint_y=None,
+                            height=dp(46), padding=[dp(12), dp(10)])
+        for w in (self.name, self.phone, self.email, self.pw):
+            root.add_widget(w)
+
+        root.add_widget(Label(size_hint_y=None, height=dp(10)))
+        root.add_widget(btn('Register', bg=C_SECONDARY, on_press=self.do_register))
+        root.add_widget(btn('Back to Login', bg=C_MUTED,
+                            on_press=lambda: setattr(self.manager, 'current', 'login')))
+
+    def do_register(self):
+        from app_globals import AppState
+        n = self.name.text.strip(); ph = self.phone.text.strip()
+        e = self.email.text.strip(); pw = self.pw.text.strip()
+        if not n or not ph or not pw:
+            toast('Name, phone and password are required'); return
+        if not ph.isdigit() or len(ph) < 10:
+            toast('Phone must be at least 10 digits'); return
+        try:
+            pid = DB.ex("INSERT INTO patients(name,phone,email,password,created_at) VALUES(?,?,?,?,?)",
+                        (n, ph, e, pw, datetime.now().isoformat()))
+        except sqlite3.IntegrityError:
+            toast('Phone already registered'); return
+        AppState.patient_id = pid
+        AppState.patient_name = n
+        for w in (self.name, self.phone, self.email, self.pw):
+            w.text = ''
+        self.manager.current = 'home'
+
+
+class HomeScreen(Screen):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.root_box = BoxLayout(orientation='vertical')
+        self.add_widget(self.root_box)
+
+    def on_pre_enter(self):
+        self.build()
+
+    def build(self):
+        from app_globals import AppState
+        self.root_box.clear_widgets()
+        # Top bar
+        right = Button(text='⏻', font_size=sp(20), background_normal='',
+                       background_color=C_PRIMARY, color=(1,1,1,1),
+                       size_hint_x=None, width=dp(44))
+        right.bind(on_release=lambda *a: self.logout())
+        self.root_box.add_widget(topbar(f'Hi, {AppState.patient_name.split()[0]}', right_widget=right))
+
+        sv, inner = scroll()
+        self.root_box.add_widget(sv)
+
+        # Search bar (button that opens search screen)
+        search = Button(text='🔍  Search doctors, clinics, specialties...',
+                        size_hint_y=None, height=dp(46),
+                        background_normal='', background_color=C_CARD,
+                        color=C_MUTED, halign='left')
+        search.bind(on_release=lambda *a: setattr(self.manager, 'current', 'search'))
+        inner.add_widget(search)
+
+        # Upcoming appointment banner
+        appt = DB.q1("""SELECT a.id, s.date, s.time, d.name
+                        FROM appointments a
+                        JOIN slots s ON s.id=a.slot_id
+                        JOIN doctors d ON d.id=a.doctor_id
+                        WHERE a.patient_id=? AND a.status='booked' AND s.date>=?
+                        ORDER BY s.date, s.time LIMIT 1""",
+                     (AppState.patient_id, date.today().strftime("%Y-%m-%d")))
+        if appt:
+            up = card(bg=get_color_from_hex('#E6F7F1'))
+            up.add_widget(lbl('📅  Upcoming Appointment', size=13, bold=True,
+                              color=C_SECONDARY))
+            up.add_widget(lbl(f"{appt['name']} — {appt['date']} at {appt['time']}",
+                              size=13))
+            inner.add_widget(up)
+
+        # Specialties
+        inner.add_widget(lbl('Specialties', size=16, bold=True, color=C_TEXT))
+        specs = DB.q("SELECT DISTINCT specialty FROM doctors ORDER BY specialty")
+        grid = GridLayout(cols=3, size_hint_y=None, spacing=dp(6), height=dp(80) * ((len(specs)+2)//3))
+        for s in specs:
+            b = Button(text=s['specialty'][:14], size_hint_y=None, height=dp(70),
+                       background_normal='', background_color=C_CARD,
+                       color=C_PRIMARY, font_size=sp(12))
+            b.bind(on_release=lambda btn, sp=s['specialty']: self.go_search(sp))
+            grid.add_widget(b)
+        inner.add_widget(grid)
+
+        # Popular doctors
+        inner.add_widget(lbl('Popular Doctors', size=16, bold=True, color=C_TEXT))
+        for d in DB.q("SELECT * FROM doctors ORDER BY rating DESC, id LIMIT 5"):
+            self.add_doctor_card(inner, d)
+
+        # Offers
+        inner.add_widget(lbl('Offers & Announcements', size=16, bold=True, color=C_TEXT))
+        offers = [
+            ('20% off first Dermatology visit', 'Skin Care Center, Baghdad'),
+            ('Free follow-up within 7 days', 'Al-Salam Clinic, Baghdad'),
+        ]
+        for title, sub in offers:
+            o = card(bg=get_color_from_hex('#FFF6E5'))
+            o.add_widget(lbl('🎁  ' + title, size=13, bold=True))
+            o.add_widget(lbl(sub, size=11, color=C_MUTED))
+            inner.add_widget(o)
+
+        # Bottom nav
+        nav = BoxLayout(size_hint_y=None, height=dp(56), spacing=dp(4))
+        for text, target in [('Home','home'), ('Search','search'),
+                             ('My Appts','appointments'), ('Settings','settings')]:
+            b = Button(text=text, background_normal='', font_size=sp(12),
+                       background_color=C_PRIMARY if target=='home' else C_CARD,
+                       color=(1,1,1,1) if target=='home' else C_TEXT)
+            b.bind(on_release=lambda btn, t=target: setattr(self.manager, 'current', t))
+            nav.add_widget(b)
+        self.root_box.add_widget(nav)
+
+    def add_doctor_card(self, parent, d):
+        c = card(height=dp(96))
+        c.add_widget(lbl(d['name'], size=14, bold=True))
+        c.add_widget(lbl(f"{d['specialty']} • {d['clinic']}", size=12, color=C_MUTED))
+        row = BoxLayout(size_hint_y=None, height=dp(28))
+        row.add_widget(lbl(f"{d['city']}  •  {d['fee']} IQD  •  ⭐ {d['rating']:.1f}",
+                           size=11, color=C_MUTED))
+        b = btn('Book', height=dp(28), size_hint_x=None)
+        b.width = dp(70)
+        b.bind(on_release=lambda *a, did=d['id']: self.open_doctor(did))
+        row.add_widget(b)
+        c.add_widget(row)
+        parent.add_widget(c)
+
+    def open_doctor(self, did):
+        self.manager.get_screen('doctor').doctor_id = did
+        self.manager.current = 'doctor'
+
+    def go_search(self, specialty=''):
+        self.manager.get_screen('search').preset_specialty = specialty
+        self.manager.current = 'search'
+
+    def logout(self):
+        from app_globals import AppState
+        AppState.patient_id = None
+        AppState.patient_name = ''
+        self.manager.current = 'login'
+
+
+class SearchScreen(Screen):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.preset_specialty = ''
+        self.root_box = BoxLayout(orientation='vertical')
+        self.add_widget(self.root_box)
+
+    def on_pre_enter(self):
+        self.build()
+
+    def build(self):
+        self.root_box.clear_widgets()
+        self.root_box.add_widget(topbar('Search Doctors',
+                                        on_back=lambda: setattr(self.manager, 'current', 'home')))
+
+        filters = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(4), padding=dp(4))
+        self.q = TextInput(hint_text='Name / specialty', multiline=False)
+        self.city = Spinner(text='All Cities', values=['All Cities','Baghdad','Basra','Erbil','Najaf','Karbala'],
+                            size_hint_x=0.4)
+        filters.add_widget(self.q)
+        filters.add_widget(self.city)
+        self.root_box.add_widget(filters)
+
+        row2 = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(4), padding=dp(4))
+        self.max_fee = Spinner(text='Any Price', values=['Any Price','10,000','15,000','20,000','25,000','30,000'])
+        self.min_rating = Spinner(text='Any Rating', values=['Any Rating','3+','4+','4.5+'])
+        apply_b = btn('Apply', height=dp(38), size_hint_x=0.3, on_press=self.run_search)
+        row2.add_widget(self.max_fee)
+        row2.add_widget(self.min_rating)
+        row2.add_widget(apply_b)
+        self.root_box.add_widget(row2)
+
+        self.sv, self.results = scroll()
+        self.root_box.add_widget(self.sv)
+        self.q.text = self.preset_specialty
+        self.run_search()
+
+    def run_search(self):
+        self.results.clear_widgets()
+        sql = "SELECT * FROM doctors WHERE 1=1"
+        params = []
+        if self.q.text.strip():
+            sql += " AND (name LIKE ? OR specialty LIKE ? OR clinic LIKE ?)"
+            v = f"%{self.q.text.strip()}%"
+            params += [v, v, v]
+        if self.city.text != 'All Cities':
+            sql += " AND city = ?"
+            params.append(self.city.text)
+        if self.max_fee.text != 'Any Price':
+            sql += " AND fee <= ?"
+            params.append(int(self.max_fee.text.replace(',', '')))
+        if self.min_rating.text != 'Any Rating':
+            sql += " AND rating >= ?"
+            params.append(float(self.min_rating.text.replace('+', '')))
+        rows = DB.q(sql + " ORDER BY rating DESC", params)
+        if not rows:
+            empty = card()
+            empty.add_widget(lbl('No doctors match your search', size=14, color=C_MUTED, halign='center'))
+            empty.add_widget(lbl('Try a different filter or clear the search', size=12, color=C_MUTED, halign='center'))
+            self.results.add_widget(empty)
+            return
+        for d in rows:
+            c = card(height=dp(110))
+            c.add_widget(lbl(d['name'], size=14, bold=True))
+            c.add_widget(lbl(f"{d['specialty']} • {d['clinic']}", size=12, color=C_MUTED))
+            c.add_widget(lbl(f"{d['city']} • {d['fee']} IQD • ⭐ {d['rating']:.1f} ({d['rating_count']})",
+                             size=11, color=C_MUTED))
+            b = btn('View Profile', height=dp(32), on_press=lambda *a, did=d['id']: self.open(did))
+            c.add_widget(b)
+            self.results.add_widget(c)
+
+    def open(self, did):
+        self.manager.get_screen('doctor').doctor_id = did
+        self.manager.current = 'doctor'
+
+
+class DoctorProfileScreen(Screen):
+    doctor_id = None
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.root_box = BoxLayout(orientation='vertical')
+        self.add_widget(self.root_box)
+
+    def on_pre_enter(self):
+        self.build()
+
+    def build(self):
+        self.root_box.clear_widgets()
+        d = DB.q1("SELECT * FROM doctors WHERE id=?", (self.doctor_id,))
+        if not d:
+            self.root_box.add_widget(lbl('Doctor not found'))
+            return
+        self.root_box.add_widget(topbar(d['name'][:22],
+                                        on_back=lambda: setattr(self.manager, 'current', 'home')))
+
+        sv, inner = scroll()
+        self.root_box.add_widget(sv)
+
+        # Profile header
+        prof = card(bg=get_color_from_hex('#EAF2FA'), height=dp(120))
+        prof.add_widget(lbl(d['name'], size=18, bold=True, color=C_PRIMARY))
+        prof.add_widget(lbl(d['specialty'], size=14, color=C_TEXT))
+        prof.add_widget(lbl(f"⭐ {d['rating']:.1f}  ({d['rating_count']} reviews)  •  {d['experience_years']} yrs exp",
+                            size=12, color=C_MUTED))
+        inner.add_widget(prof)
+
+        # Clinic info
+        info = card()
+        info.add_widget(lbl('Clinic', size=13, bold=True))
+        info.add_widget(lbl(d['clinic'], size=13))
+        info.add_widget(lbl(f"{d['address']}, {d['city']}", size=12, color=C_MUTED))
+        info.add_widget(lbl(f"Working hours: {d['working_hours']}", size=12, color=C_MUTED))
+        info.add_widget(lbl(f"Fee: {d['fee']} IQD", size=13, bold=True, color=C_SECONDARY))
+        if d['qualification']:
+            info.add_widget(lbl(f"Qualifications: {d['qualification']}", size=12, color=C_MUTED))
+
+        dir_b = btn('📍 Get Directions (Google Maps)', bg=C_SECONDARY, height=dp(38),
+                    on_press=lambda: self.open_maps(d['lat'], d['lng'], d['clinic']))
+        info.add_widget(dir_b)
+        inner.add_widget(info)
+
+        # Available slots
+        inner.add_widget(lbl('Available Slots', size=16, bold=True))
+        today = date.today().strftime("%Y-%m-%d")
+        slots = DB.q("SELECT * FROM slots WHERE doctor_id=? AND booked=0 AND date>=? ORDER BY date, time LIMIT 60",
+                     (self.doctor_id, today))
+        if not slots:
+            inner.add_widget(lbl('No available slots', color=C_MUTED, size=13))
+        else:
+            by_date = {}
+            for s in slots:
+                by_date.setdefault(s['date'], []).append(s)
+            for dstr, ss in list(by_date.items())[:5]:
+                day_card = card()
+                day_card.add_widget(lbl(dstr, size=13, bold=True, color=C_PRIMARY))
+                grid = GridLayout(cols=4, size_hint_y=None, spacing=dp(4),
+                                  height=dp(40) * ((len(ss)+3)//4))
+                for s in ss:
+                    b = Button(text=s['time'], background_normal='',
+                               background_color=get_color_from_hex('#EAF2FA'),
+                               color=C_PRIMARY, font_size=sp(12))
+                    b.bind(on_release=lambda btn, sid=s['id'], ds=dstr, tm=s['time']:
+                           self.confirm_booking(d['id'], sid, d['name'], ds, tm))
+                    grid.add_widget(b)
+                day_card.add_widget(grid)
+                inner.add_widget(day_card)
+
+        # Rate button
+        self.root_box.add_widget(btn('⭐ Rate this Doctor', bg=C_SECONDARY,
+                                     on_press=lambda: self.rate_dialog(d['id'])))
+
+    def open_maps(self, lat, lng, name):
+        if lat and lng:
+            url = f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
+        else:
+            url = f"https://www.google.com/maps/search/{name.replace(' ', '+')}"
+        webbrowser.open(url)
+
+    def confirm_booking(self, did, sid, dname, ddate, dtime):
+        from app_globals import AppState
+        content = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(8))
+        content.add_widget(lbl(f"Doctor: {dname}", size=13))
+        content.add_widget(lbl(f"Date: {ddate}", size=13))
+        content.add_widget(lbl(f"Time: {dtime}", size=13))
+        content.add_widget(Label())
+        row = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
+        pop = Popup(title='Confirm Booking', content=content,
+                    size_hint=(0.85, 0.5))
+        ok = btn('Confirm', bg=C_SECONDARY, on_press=lambda: self.do_book(did, sid, pop))
+        no = btn('Cancel', bg=C_MUTED, on_press=lambda: pop.dismiss())
+        row.add_widget(no); row.add_widget(ok)
+        content.add_widget(row)
+        pop.open()
+
+    def do_book(self, did, sid, popup):
+        from app_globals import AppState
+        try:
+            # Double-booking prevention: UNIQUE constraint on slot_id
+            # First mark slot booked atomically (only if still free)
+            cur = DB._conn.execute("UPDATE slots SET booked=1 WHERE id=? AND booked=0", (sid,))
+            DB._conn.commit()
+            if cur.rowcount == 0:
+                popup.dismiss()
+                toast('This slot is already booked. Choose another.')
+                return
+            DB.ex("INSERT INTO appointments(doctor_id,patient_id,slot_id,status,created_at) VALUES(?,?,?,?,?)",
+                  (did, AppState.patient_id, sid, 'booked', datetime.now().isoformat()))
+            popup.dismiss()
+            toast('Booking confirmed!')
+            self.build()
+        except sqlite3.IntegrityError:
+            DB._conn.execute("UPDATE slots SET booked=0 WHERE id=?", (sid,))
+            DB._conn.commit()
+            popup.dismiss()
+            toast('This slot is already booked.')
+
+    def rate_dialog(self, did):
+        content = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(8))
+        content.add_widget(lbl('Rating (1-5):', size=13))
+        spinner = Spinner(text='5', values=['1','2','3','4','5'],
+                          size_hint_y=None, height=dp(44))
+        comment = TextInput(hint_text='Comment (optional)', multiline=False,
+                            size_hint_y=None, height=dp(44))
+        content.add_widget(spinner)
+        content.add_widget(comment)
+        pop = Popup(title='Rate Doctor', content=content, size_hint=(0.85, 0.5))
+        row = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
+        row.add_widget(btn('Cancel', bg=C_MUTED, on_press=lambda: pop.dismiss()))
+        row.add_widget(btn('Submit', bg=C_SECONDARY,
+                           on_press=lambda: self.submit_rating(did, int(spinner.text),
+                                                               comment.text, pop)))
+        content.add_widget(row)
+        pop.open()
+
+    def submit_rating(self, did, stars, comment, popup):
+        from app_globals import AppState
+        DB.ex("INSERT INTO reviews(doctor_id,patient_id,rating,comment,created_at) VALUES(?,?,?,?,?)",
+              (did, AppState.patient_id, stars, comment, datetime.now().isoformat()))
+        row = DB.q1("SELECT rating, rating_count FROM doctors WHERE id=?", (did,))
+        new_count = row['rating_count'] + 1
+        new_avg = (row['rating'] * row['rating_count'] + stars) / new_count
+        DB.ex("UPDATE doctors SET rating=?, rating_count=? WHERE id=?",
+              (new_avg, new_count, did))
+        popup.dismiss()
+        toast('Thank you for rating!')
+        self.build()
+
+
+class AppointmentsScreen(Screen):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.root_box = BoxLayout(orientation='vertical')
+        self.add_widget(self.root_box)
+
+    def on_pre_enter(self):
+        self.build()
+
+    def build(self):
+        from app_globals import AppState
+        self.root_box.clear_widgets()
+        self.root_box.add_widget(topbar('My Appointments',
+                                        on_back=lambda: setattr(self.manager, 'current', 'home')))
+        sv, inner = scroll()
+        self.root_box.add_widget(sv)
+
+        rows = DB.q("""SELECT a.id, a.status, s.date, s.time, s.id as sid,
+                              d.name as dname, d.clinic, d.specialty, d.id as did
+                       FROM appointments a
+                       JOIN slots s ON s.id=a.slot_id
+                       JOIN doctors d ON d.id=a.doctor_id
+                       WHERE a.patient_id=?
+                       ORDER BY CASE WHEN a.status='booked' THEN 0 ELSE 1 END, s.date DESC""",
+                    (AppState.patient_id,))
+        if not rows:
+            empty = card()
+            empty.add_widget(lbl('You have no appointments yet.', size=14,
+                                 color=C_MUTED, halign='center'))
+            inner.add_widget(empty)
+            return
+        for r in rows:
+            c = card(height=dp(140))
+            c.add_widget(lbl(r['dname'], size=14, bold=True))
+            c.add_widget(lbl(f"{r['specialty']} • {r['clinic']}", size=12, color=C_MUTED))
+            c.add_widget(lbl(f"📅 {r['date']}  🕒 {r['time']}", size=13))
+            status_text = '✅ Booked' if r['status'] == 'booked' else '❌ Cancelled'
+            c.add_widget(lbl(status_text, size=12,
+                             color=C_SECONDARY if r['status']=='booked' else C_DANGER))
+            if r['status'] == 'booked':
+                row = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(4))
+                row.add_widget(btn('Cancel', bg=C_DANGER, height=dp(34),
+                                   on_press=lambda *a, aid=r['id'], sid=r['sid']: self.cancel(aid, sid)))
+                row.add_widget(btn('Reschedule', bg=C_SECONDARY, height=dp(34),
+                                   on_press=lambda *a, did=r['did'], aid=r['id'], sid=r['sid']:
+                                   self.reschedule(did, aid, sid)))
+                c.add_widget(row)
+            inner.add_widget(c)
+
+    def cancel(self, aid, sid):
+        def _do(popup):
+            DB.ex("UPDATE appointments SET status='cancelled' WHERE id=?", (aid,))
+            DB.ex("UPDATE slots SET booked=0 WHERE id=?", (sid,))
+            popup.dismiss()
+            toast('Appointment cancelled')
+            self.build()
+        content = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(8))
+        content.add_widget(lbl('Cancel this appointment?', size=14))
+        pop = Popup(title='Confirm', content=content, size_hint=(0.8, 0.4))
+        row = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
+        row.add_widget(btn('No', bg=C_MUTED, on_press=lambda: pop.dismiss()))
+        row.add_widget(btn('Yes, Cancel', bg=C_DANGER, on_press=lambda: _do(pop)))
+        content.add_widget(row)
+        pop.open()
+
+    def reschedule(self, did, aid, sid):
+        # Free old slot, cancel old appt, open doctor profile
+        DB.ex("UPDATE appointments SET status='cancelled' WHERE id=?", (aid,))
+        DB.ex("UPDATE slots SET booked=0 WHERE id=?", (sid,))
+        self.manager.get_screen('doctor').doctor_id = did
+        toast('Old slot released. Pick a new one.')
+        self.manager.current = 'doctor'
+
+
+class SettingsScreen(Screen):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.root_box = BoxLayout(orientation='vertical')
+        self.add_widget(self.root_box)
+
+    def on_pre_enter(self):
+        from app_globals import AppState
+        self.root_box.clear_widgets()
+        self.root_box.add_widget(topbar('Settings',
+                                        on_back=lambda: setattr(self.manager, 'current', 'home')))
+        sv, inner = scroll()
+        self.root_box.add_widget(sv)
+        acc = DB.q1("SELECT * FROM patients WHERE id=?", (AppState.patient_id,))
+        info = card()
+        info.add_widget(lbl('Account', size=14, bold=True))
+        info.add_widget(lbl(acc['name'], size=13))
+        info.add_widget(lbl(acc['phone'], size=12, color=C_MUTED))
+        if acc['email']:
+            info.add_widget(lbl(acc['email'], size=12, color=C_MUTED))
+        inner.add_widget(info)
+
+        inner.add_widget(btn('Logout', bg=C_MUTED, on_press=self.logout))
+        inner.add_widget(btn('Delete Account Permanently', bg=C_DANGER,
+                             on_press=self.delete_account))
+
+        about = card(bg=get_color_from_hex('#EAF2FA'))
+        about.add_widget(lbl('About', size=13, bold=True))
+        about.add_widget(lbl('Data stored locally on your device in SQLite.', size=11,
+                             color=C_MUTED, wrap=True))
+        about.add_widget(lbl('We only collect name, phone, email and your bookings.', size=11,
+                             color=C_MUTED, wrap=True))
+        about.add_widget(lbl('No medical info is shared publicly.', size=11, color=C_MUTED))
+        inner.add_widget(about)
+
+    def logout(self):
+        from app_globals import AppState
+        AppState.patient_id = None
+        AppState.patient_name = ''
+        self.manager.current = 'login'
+
+    def delete_account(self):
+        from app_globals import AppState
+        def _do(popup):
+            DB.ex("DELETE FROM patients WHERE id=?", (AppState.patient_id,))
+            AppState.patient_id = None
+            popup.dismiss()
+            toast('Account deleted')
+            self.manager.current = 'login'
+        content = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(8))
+        content.add_widget(lbl('This will delete your account and all your appointments. Continue?',
+                               size=13, wrap=True))
+        pop = Popup(title='Delete Account', content=content, size_hint=(0.85, 0.4))
+        row = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
+        row.add_widget(btn('No', bg=C_MUTED, on_press=lambda: pop.dismiss()))
+        row.add_widget(btn('Yes, Delete', bg=C_DANGER, on_press=lambda: _do(pop)))
+        content.add_widget(row)
+        pop.open()
+
+
+# ============================================================
+#  APP STATE
+# ============================================================
+# in-memory session holder
+class _State:
+    patient_id = None
+    patient_name = ''
+# expose as module for convenience
+import sys, types
+app_globals = types.ModuleType('app_globals')
+app_globals.AppState = _State
+sys.modules['app_globals'] = app_globals
+
+
+# ============================================================
+#  MAIN APP
+# ============================================================
+class ClinicApp(App):
+    def build(self):
+        Window.clearcolor = C_BG
+        self.title = 'Doctor Booking Iraq'
+        DB.init()
+        sm = ScreenManager(transition=SlideTransition())
+        sm.add_widget(LoginScreen(name='login'))
+        sm.add_widget(RegisterScreen(name='register'))
+        sm.add_widget(HomeScreen(name='home'))
+        sm.add_widget(SearchScreen(name='search'))
+        sm.add_widget(DoctorProfileScreen(name='doctor'))
+        sm.add_widget(AppointmentsScreen(name='appointments'))
+        sm.add_widget(SettingsScreen(name='settings'))
+        return sm
+
+    def on_stop(self):
+        if DB._conn:
+            DB._conn.close()
+
+
+if __name__ == '__main__':
+    ClinicApp().run()
